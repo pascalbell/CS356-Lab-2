@@ -222,6 +222,55 @@ void sr_handlepacket(struct sr_instance* sr,
         fprintf(stderr, "IP header checksum incorrect\n");
             return;
         }
+
+        /* Check if the IP packet is destined for this router */
+        struct sr_if *iface = sr->if_list;
+        while (iface) {
+            if (iface->ip == ip_hdr->ip_dst) {
+                printf("Received IP packet destined for router\n");
+
+                /* Check if the packet is ICMP echo request */
+                if (ip_hdr->ip_p == ip_protocol_icmp) {
+                    /* Calculate ICMP header offset */
+                    uint8_t *icmp_pkt = packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t); /* ICMP packet starts after IP header */
+
+                    /* Extract ICMP header */
+                    sr_icmp_hdr_t *icmp_hdr = (sr_icmp_hdr_t *)icmp_pkt;
+
+                    /* Check if it is an ICMP echo request */
+                    if (icmp_hdr->icmp_type == 8 && icmp_hdr->icmp_code == 0) {
+                        printf("Received ICMP echo request\n");
+                        
+                        /* construct ICMP echo reply packet */
+                        uint8_t *icmp_reply_pkt = malloc(sizeof(sr_ethernet_hdr_t) + ntohs(ip_hdr->ip_len));
+                        memcpy(icmp_reply_pkt, packet, sizeof(sr_ethernet_hdr_t) + ntohs(ip_hdr->ip_len)); /* Copy the original packet */
+                        sr_ip_hdr_t *icmp_reply_ip_hdr = (sr_ip_hdr_t *)(icmp_reply_pkt + sizeof(sr_ethernet_hdr_t));
+                        sr_icmp_hdr_t *icmp_reply_icmp_hdr = (sr_icmp_hdr_t *)(icmp_reply_pkt + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t));
+
+                        /* Fill in the ICMP echo reply header */
+                        icmp_reply_icmp_hdr->icmp_type = 0; /* ICMP echo reply */
+                        icmp_reply_icmp_hdr->icmp_code = 0;
+                        icmp_reply_icmp_hdr->icmp_sum = 0; /* Clear checksum field before computing checksum */
+                        icmp_reply_icmp_hdr->icmp_sum = cksum(icmp_reply_pkt + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t), ntohs(ip_hdr->ip_len) - sizeof(sr_ip_hdr_t)); /* Compute ICMP checksum */
+
+                        /* Send ICMP echo reply packet */
+                        int send_result = sr_send_packet(sr, icmp_reply_pkt, sizeof(sr_ethernet_hdr_t) + ntohs(ip_hdr->ip_len), interface);
+                        if (send_result != 0) {
+                            fprintf(stderr, "Failed to send ICMP echo reply packet\n");
+                            /* Handle error, e.g., resend packet or notify user */
+                        } else {
+                            printf("ICMP echo reply sent\n");
+                        }
+
+                        free(icmp_reply_pkt); /* Free memory allocated for packet */
+                    }
+                }
+                return; /* Exit function after processing IP packet */
+            }
+            iface = iface->next;
+        }
+
+        /* else if packet is for a different router, follow steps and add to ARP request queue */
     }
 
 }/* end sr_ForwardPacket */
