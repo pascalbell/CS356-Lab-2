@@ -159,10 +159,10 @@ void sr_handlepacket(struct sr_instance* sr,
             } else {
                 fprintf(stderr, "No requests waiting on this MAC \n");
             }
+            
             /* Now you have to check if the request is destined to its own interface and 
                 send the ARP reply with the MAC header back if so
             */
-
             struct sr_if *iface = sr->if_list;
             while (iface) {
                 if (iface->ip == arp_hdr->ar_tip) {             /* If ARP IP matches interface IP */
@@ -179,10 +179,10 @@ void sr_handlepacket(struct sr_instance* sr,
                     arp_reply_eth_hdr->ether_type = htons(ethertype_arp); /* ARP type */
                     
                     /* Fill in ARP header */
-                    arp_reply_hdr->ar_hrd = htons(arp_hrd_ethernet); /* Hardware type */
-                    arp_reply_hdr->ar_pro = htons(ethertype_ip); /* Protocol type */
-                    arp_reply_hdr->ar_hln = ETHER_ADDR_LEN; /* Hardware address length */
-                    arp_reply_hdr->ar_pln = sizeof(uint32_t); /* Protocol address length */
+                    arp_reply_hdr->ar_hrd = arp_hdr->ar_hrd; /* Hardware type */
+                    arp_reply_hdr->ar_pro = arp_hdr->ar_pro; /* Protocol type */
+                    arp_reply_hdr->ar_hln = arp_hdr->ar_hln; /* Hardware address length */
+                    arp_reply_hdr->ar_pln = arp_hdr->ar_pln; /* Protocol address length */
                     arp_reply_hdr->ar_op = htons(arp_op_reply); /* ARP reply opcode */
                     memcpy(arp_reply_hdr->ar_sha, iface->addr, ETHER_ADDR_LEN); /* Sender hardware address (MAC) */
                     arp_reply_hdr->ar_sip = iface->ip; /* Sender protocol address (IP) */
@@ -192,21 +192,24 @@ void sr_handlepacket(struct sr_instance* sr,
                     /* Send ARP reply packet */
                     int send_result = sr_send_packet(sr, arp_reply_pkt, sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t), iface->name);
                     free(arp_reply_pkt); /* Free memory allocated for packet */
+                    sr_arpreq_destroy(&(sr->cache), req);
                     if (send_result != 0) {
                         fprintf(stderr, "Failed to send ARP reply packet\n");
                         /* Handle error, e.g., resend packet or notify user */
                     } else {
                         printf("ARP reply sent\n");
                     }
+                    break;
                 }
                 iface = iface->next;
             }
-        }     
+        }               /* THIS PART IS COMPLETE AND WORKS */
     } else if (ntohs(ethernet_hdr->ether_type) == ethertype_ip) {       /* Check if the packet is IP packet */
         printf("Detected IP Header\n");
 
         print_hdrs(packet, len);
 
+        /* Check that packet is right length */
         if (len < sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t)) {
             fprintf(stderr, "Packet is too short for IP header\n");
             return;
@@ -240,6 +243,23 @@ void sr_handlepacket(struct sr_instance* sr,
                     /* Check if it is an ICMP echo request */
                     if (icmp_hdr->icmp_type == 8 && icmp_hdr->icmp_code == 0) {
                         printf("Received ICMP echo request\n");
+
+
+                        /* construct echo reply and copy into the packet data */
+                        uint8_t* icmp_echo_reply = (uint8_t*)malloc(len);
+                        int i = 0;
+                        for (i = 0; i < len; i++) {
+                            icmp_echo_reply[i] = packet[i];
+                        }
+
+                        /*
+                        1. make a new packet, cast it to ethernet packet, set the ethernet header like mac address
+                        2. set the IP packet field, checksum - size of IP header new packet
+                        3. Set ICMP fields
+                        
+                        
+                        ICMP packet fomat: Send ICMP with normal IP header, then ICMP header, then IP header of messed up packet, then payload of original
+                        */
                         
                         /* construct ICMP echo reply packet */
                         uint8_t *icmp_reply_pkt = malloc(sizeof(sr_ethernet_hdr_t) + ntohs(ip_hdr->ip_len));
@@ -251,7 +271,9 @@ void sr_handlepacket(struct sr_instance* sr,
                         icmp_reply_icmp_hdr->icmp_type = 0; /* ICMP echo reply */
                         icmp_reply_icmp_hdr->icmp_code = 0;
                         icmp_reply_icmp_hdr->icmp_sum = 0; /* Clear checksum field before computing checksum */
-                        icmp_reply_icmp_hdr->icmp_sum = cksum(icmp_reply_pkt + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t), ntohs(ip_hdr->ip_len) - sizeof(sr_ip_hdr_t)); /* Compute ICMP checksum */
+                        icmp_reply_icmp_hdr->icmp_sum = cksum((uint8_t*)icmp_reply_icmp_hdr, len - sizeof(sr_ethernet_hdr_t) - sizeof(sr_ip_hdr_t)); /* Compute ICMP checksum */
+
+                        /* FILL IN OTHER FIELDS HERE */
 
                         /* Send ICMP echo reply packet */
                         int send_result = sr_send_packet(sr, icmp_reply_pkt, sizeof(sr_ethernet_hdr_t) + ntohs(ip_hdr->ip_len), interface);
@@ -264,6 +286,8 @@ void sr_handlepacket(struct sr_instance* sr,
 
                         free(icmp_reply_pkt); /* Free memory allocated for packet */
                     }
+                } else if (ip_hdr->ip_p == 6 || ip_hdr->ip_p == 17) {
+                    /* If the packet contains a TCP or UDP payload, send an ICMP port unreachable to the sending host. Otherwise, ignore the packet. Packets destined elsewhere should be forwarded using your normal forwarding logic. */
                 }
                 return; /* Exit function after processing IP packet */
             }
@@ -271,6 +295,65 @@ void sr_handlepacket(struct sr_instance* sr,
         }
 
         /* else if packet is for a different router, follow steps and add to ARP request queue */
+        printf("IP packet not destined for this router");
+        
+        /* Decrement the TTL by 1 and recomput checksum*/
+        ip_hdr->ip_ttl -= 1;
+        if (ip_hdr->ip_ttl == 0) {
+            /* Send ICMP with normal IP header, then ICMP header, then IP header of messed up packet, then payload of original*/
+        }
+
+        ip_hdr->ip_sum = cksum(ip_hdr, sizeof(sr_ip_hdr_t));
+
+        /* Find the longest prefix match */
+        struct in_addr dest_ip_addr;
+        dest_ip_addr.s_addr = ip_hdr->ip_dst;  // Assuming ip_hdr->ip_dst is a uint32_t representing the destination IP address
+        struct sr_rt* longest_match_entry = find_longest_prefix_match(sr, dest_ip_addr);
+        if (longest_match_entry) {
+            /* Found the longest prefix match */
+            printf("Longest prefix match found in routing table\n");
+
+            /* Now you can proceed with forwarding the packet based on the longest match entry */
+            /* Code to forward packet using the information in longest_match_entry */
+
+            /* Use isntructions on lab2 */
+        } else {
+            /* No matching entry found in routing table */
+            fprintf(stderr, "No matching entry found in routing table for destination IP\n");
+            /* send ICMP destination net unreachable (type 3, code 0) */
+        }
+
+
     }
 
 }/* end sr_ForwardPacket */
+
+/* Function to find the longest prefix match */
+struct sr_rt* find_longest_prefix_match(struct sr_instance* sr, struct in_addr dest_ip) {
+    struct sr_rt* longest_match = NULL;
+    int max_prefix_length = -1;
+
+    /* Iterate through the routing table */
+    struct sr_rt* rt_entry = sr->routing_table;
+    while (rt_entry) {
+        /* Calculate the prefix length */
+        struct in_addr masked_dest = {dest_ip.s_addr & rt_entry->mask.s_addr};
+        int prefix_length = 0;
+        uint32_t mask = ntohl(rt_entry->mask.s_addr);
+        while (mask) {
+            mask >>= 1;
+            prefix_length++;
+        }
+
+        /* Check if the current entry has a longer prefix match */
+        if ((masked_dest.s_addr == rt_entry->dest.s_addr) && (prefix_length > max_prefix_length)) {
+            max_prefix_length = prefix_length;
+            longest_match = rt_entry;
+        }
+
+        /* Move to the next entry */
+        rt_entry = rt_entry->next;
+    }
+
+    return longest_match;
+}
