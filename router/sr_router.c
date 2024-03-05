@@ -26,6 +26,11 @@
 #include "sr_utils.h"
 #include "vnscommand.h"
 
+ #define MIN(a,b) \
+   ({ __typeof__ (a) _a = (a); \
+       __typeof__ (b) _b = (b); \
+     _a < _b ? _a : _b; })
+
 /*---------------------------------------------------------------------
  * Method: sr_init(void)
  * Scope:  Global
@@ -82,42 +87,6 @@ void sr_init(struct sr_instance* sr)
  *
  *---------------------------------------------------------------------*/
 
-
-
-/* Function to find the longest prefix match */
-struct sr_rt* find_longest_prefix_match(struct sr_instance* sr, struct in_addr dest_ip) {
-    struct sr_rt* longest_match = NULL;
-    int max_prefix_length = -1;
-
-    /* Iterate through the routing table */
-    struct sr_rt* rt_entry = sr->routing_table;
-    while (rt_entry) {
-        /* Calculate the prefix length */
-        struct in_addr masked_dest = {dest_ip.s_addr & rt_entry->mask.s_addr};
-        int prefix_length = 0;
-        uint32_t mask = ntohl(rt_entry->mask.s_addr);
-        while (mask) {
-            mask >>= 1;
-            prefix_length++;
-        }
-
-        /* Check if the current entry has a longer prefix match */
-        if ((masked_dest.s_addr == rt_entry->dest.s_addr) && (prefix_length > max_prefix_length)) {
-            max_prefix_length = prefix_length;
-            longest_match = rt_entry;
-        }
-
-        /* Move to the next entry */
-        rt_entry = rt_entry->next;
-    }
-
-    return longest_match;
-}
-
-
-
-
-
 void sr_handlepacket(struct sr_instance* sr,
         uint8_t * packet/* lent */,
         unsigned int len,
@@ -167,7 +136,7 @@ void sr_handlepacket(struct sr_instance* sr,
                     }
                     pkt = pkt->next;
                 }
-                sr_arpreq_destroy(&sr->cache, req);                 /* Destroy the request */
+                sr_arpreq_destroy(&(sr->cache), req);                 /* Destroy the request */
           } else {
               fprintf(stderr, "No requests waiting on this MAC \n");
           }
@@ -258,7 +227,7 @@ void sr_handlepacket(struct sr_instance* sr,
         sr_ip_hdr_t *ip_hdr = (sr_ip_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t));
         
         /* perform checksum, check not equal to zero or 0xFFFF for bad checksum */
-        uint16_t checksum = cksum(ip_hdr, sizeof(sr_ip_hdr_t));
+        uint16_t checksum = cksum((uint8_t *)ip_hdr, sizeof(sr_ip_hdr_t));
         printf("Checksum result: 0x%04x\n", checksum);
         if (checksum != 0 && checksum != 0xFFFF) {
             fprintf(stderr, "IP header checksum incorrect\n");
@@ -269,6 +238,7 @@ void sr_handlepacket(struct sr_instance* sr,
         /* Check if the IP packet is destined for this router */
         struct sr_if *iface = sr->if_list;
         while (iface) {
+            /* Error with this while loop */
             if (iface->ip == ip_hdr->ip_dst) {
                 printf("Received IP packet destined for router\n");
 
@@ -289,10 +259,14 @@ void sr_handlepacket(struct sr_instance* sr,
                         for (i = 0; i < len; i++) {
                             icmp_echo_reply[i] = packet[i];
                         } 
+                        copy echo message into echo reply, make ICMP header, make IP header, ethernet
+
                         1. wrap this echo reply in ethernet header first
                         2. set the IP packet field, checksum - size of IP header new packet
                         3. Set ICMP header
                         ICMP packet fomat: Send ICMP with normal IP header, then ICMP header, then IP header of messed up packet, then payload of original
+                        
+                        BELOW IS WRONG NEEDS TO BE FIXED
                         */
                         
 
@@ -345,8 +319,10 @@ void sr_handlepacket(struct sr_instance* sr,
                         }
 
                     }
-                } else if (ip_hdr->ip_p == 6 || ip_hdr->ip_p == 17) {
+                } else {   /* if (ip_hdr->ip_p == 6 || ip_hdr->ip_p == 17) */
                     printf("Received packet with TCP or UDP payload\n");
+
+                    /* THIS IS WRONG FIX IT */
 
                     /* Calculate the total length of the ICMP packet */
                     int icmp_packet_len = sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t) + sizeof(sr_icmp_hdr_t); /* ADD LEN?? FOR PAYLOAD? */
@@ -397,6 +373,9 @@ void sr_handlepacket(struct sr_instance* sr,
 
                 }
                 return; /* Exit function after processing IP packet */
+            }
+            if (!iface->next) {
+                break;
             }
             iface = iface->next;
         }
@@ -451,29 +430,59 @@ void sr_handlepacket(struct sr_instance* sr,
             free(icmp_time_exceeded_pkt); /* Free memory allocated for ICMP packet */
             if (send_result != 0) {
                 fprintf(stderr, "Failed to send ICMP time exceeded packet\n");
+                return;
                 /* Handle error, e.g., resend packet or notify user */
             } else {
                 printf("ICMP time exceeded packet sent\n");
+                return;
             }
         }
 
         /* Recompute checksum if TTL != 0 */
+        ip_hdr->ip_sum = 0;
         ip_hdr->ip_sum = cksum(ip_hdr, sizeof(sr_ip_hdr_t));
 
-        /* Find the longest prefix match */
-        struct in_addr dest_ip_addr;
-        dest_ip_addr.s_addr = ip_hdr->ip_dst;  /* Assuming ip_hdr->ip_dst is a uint32_t representing the destination IP address */
-        struct sr_rt* longest_match_entry = NULL;
-        longest_match_entry = find_longest_prefix_match(sr, dest_ip_addr);
-        if (longest_match_entry) {
+
+        /* Iterate through the routing table and find longest match */
+        struct sr_rt* longest_match = NULL;
+        struct sr_rt* rt_entry = sr->routing_table;
+        while (rt_entry) {
+            if (rt_entry->dest.s_addr == ip_hdr->ip_dst) {
+                if (!longest_match) {
+                    longest_match = rt_entry;
+                } else {
+                    struct sr_if* this_if = sr_get_interface(sr, rt_entry->interface);
+                    struct sr_if* longest_if = sr_get_interface(sr, longest_match->interface);
+                    if (MIN(this_if->mask, ~(this_if->ip ^ ip_hdr->ip_dst)) > MIN(longest_if->mask, ~(longest_if->ip ^ ip_hdr->ip_dst))) {
+                        longest_match = rt_entry;
+                    }
+                }
+            }
+            rt_entry = rt_entry->next;
+        }
+
+        if (longest_match) {
             /* Found the longest prefix match */
             printf("Longest prefix match found in routing table\n");
-            sr_print_routing_entry(longest_match_entry);
+            sr_print_routing_entry(longest_match);
 
-            /* Now you can proceed with forwarding the packet based on the longest match entry */
-            /* Code to forward packet using the information in longest_match_entry */
-
-            /* Use isntructions on lab2 */
+            /* Check if the next hop IP is in the ARP cache */
+            struct sr_arpentry* arp_entry = sr_arpcache_lookup(&sr->cache, longest_match->gw.s_addr);
+            if (arp_entry) {
+                /* Use the MAC address mapping in the ARP cache entry to send the packet */
+                int send_result = sr_send_packet(sr, packet, len, longest_match->interface);
+                if (send_result != 0) {
+                    fprintf(stderr, "Failed to send packet to next hop IP\n");
+                    /* Handle error, e.g., resend packet or notify user */
+                } else {
+                    printf("Packet sent to next hop IP\n");
+                }
+                /* sr_arpreq_destroy(&(sr->cache), arp_entry); */ /* Free the ARP cache entry */
+            } else {
+                struct sr_arpreq *req = sr_arpcache_queuereq(&(sr->cache), longest_match->gw.s_addr, packet, len, longest_match->interface);
+                printf("Packet queued in ARP request queue\n");
+                /* handle_arpreq(req) */
+            }              
         } else {
             /* No matching entry found in routing table */
             fprintf(stderr, "No matching entry found in routing table for destination IP\n");
