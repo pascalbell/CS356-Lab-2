@@ -23,6 +23,7 @@
 #include "sr_router.h"
 #include "sr_protocol.h"
 #include "sr_arpcache.h"
+#include "sr_arpcache.c"
 #include "sr_utils.h"
 #include "vnscommand.h"
 
@@ -299,6 +300,7 @@ void sr_handlepacket(struct sr_instance* sr,
                        } else {
                            printf("ICMP echo reply packet sent\n");
                        }
+                       return;
                     }
                 } else {   /* if (ip_hdr->ip_p == 6 || ip_hdr->ip_p == 17) */
                     printf("Received packet with TCP or UDP payload\n");
@@ -356,7 +358,6 @@ void sr_handlepacket(struct sr_instance* sr,
                     } else {
                         printf("ICMP port unreachable packet sent\n");
                     }
-
                 }
                 return; /* Exit function after processing IP packet */
             }
@@ -548,6 +549,7 @@ void sr_handlepacket(struct sr_instance* sr,
             } else {
                 printf("ICMP port unreachable packet sent\n");
             }
+            return;
         }
 
 
